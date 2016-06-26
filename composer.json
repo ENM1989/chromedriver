@@ -1,0 +1,25 @@
+{
+    "name": "enm1989/chromedriver",
+    "description": "Composer distribution of Chromedriver. Adds a executable to your composer bin directory.",
+    "type": "library",
+    "keywords": [
+        "selenium",
+        "chrome",
+        "webdriver",
+        "chromedriver"
+    ],
+    "homepage": "https://github.com/ENM1989/chromedriver",
+    "license": "Apache License, Version 2.0", 
+    "authors": [
+        {
+            "name": "Nico Müller",
+            "email": "nico.mueller.1989@googlemail.com"
+        }
+    ],
+    "config": {
+        "bin-dir": "bin"
+    },
+    "bin": [
+        "bin/chromedriver"
+    ]
+}
