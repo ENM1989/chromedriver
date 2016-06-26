@@ -9,7 +9,7 @@
         "chromedriver"
     ],
     "homepage": "https://github.com/ENM1989/chromedriver",
-    "license": "Apache License, Version 2.0", 
+    "license": "Apache License Version 2.0", 
     "authors": [
         {
             "name": "Nico Müller",
