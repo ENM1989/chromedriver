@@ -21,5 +21,13 @@
     },
     "bin": [
         "bin/chromedriver"
-    ]
+    ],
+    "scripts": {
+        "post-install-cmd": [
+            "php scripts/update-chromedriver.php"
+        ],
+        "post-update-cmd": [
+            "php scripts/update-chromedriver.php"
+        ]
+    }
 }
