@@ -2,4 +2,5 @@
 .project
 .settings/
 .idea
-bin/chromedriver
+bin/chromedriver.exe
+bin/chromedriver-manifest.json

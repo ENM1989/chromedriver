@@ -1,0 +1,234 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * The single chromedriver update script (also a composer post-install/updater).
+ *
+ * As a composer bin it is available to CONSUMERS as vendor/bin/update-chromedriver
+ * (composer only runs scripts of the root package, so the post-install-cmd hook
+ * below never fires for consumers). Consumers install their platform's
+ * chromedriver by calling vendor/bin/chromedriver once - the committed
+ * bootstrap shim runs this script in automatic mode - and update explicitly
+ * with this bin.
+ *
+ * Default (no arguments) - one-version-only automatic mode:
+ *   - Binary missing                        -> install the current stable version
+ *                                              (establish a baseline).
+ *   - Manifest missing or hash mismatch     -> re-download the current stable
+ *                                              version (re-establish a verified
+ *                                              baseline).
+ *   - Installed binary is for another OS    -> install the same version for
+ *     (manifest platform differs             this host's platform; when that
+ *     from the host platform)                version is not published for it,
+ *                                            install the current stable as a
+ *                                            fresh baseline.
+ *   - Verified baseline exists              -> step exactly ONE version up
+ *                                              (e.g. 148 -> 149 -> 150). It never
+ *                                              jumps to the latest stable.
+ *   - Next version not available/downloadable for the platform -> exit 0 with a
+ *     note (a post-install failure would abort composer install).
+ *
+ * Explicit pin/downgrade mode:
+ *   php scripts/update-chromedriver --version=115
+ *   php scripts/update-chromedriver --version=115.0.5790.170 --platform=linux64
+ *
+ *   --version accepts a full version or a bare milestone (e.g. "115" -> highest
+ *   available version of that milestone). A version below the installed one is a
+ *   deliberate downgrade and skips the next-version logic. Non-interactive:
+ *   resolves (highest of the milestone), hash-verifies, installs, and records
+ *   the manifest. --platform overrides the manifest/host platform lookup - this
+ *   is how a binary for another machine (e.g. linux64 on an arm64 host that
+ *   cannot execute it) is pinned and shipped.
+ *
+ * Linux/macOS note: this bin (and the shim at bin/chromedriver) must be
+ * executable in git; the automatic mode overwrites bin/chromedriver itself, so
+ * after a local run `git checkout -- bin/chromedriver` restores the shim.
+ *
+ * bin/chromedriver MUST stay a POSIX shell script (not PHP): composer reads the
+ * first 500 bytes of a bin file when generating the vendor/bin proxy - PHP
+ * content produces an include-proxy (which would break once the binary replaces
+ * the shim), while any other content produces a shell proxy that EXECs whatever
+ * lives at bin/chromedriver. That is exactly what this project relies on.
+ *
+ * The platform is always the host platform (the OS the script runs on), so every
+ * machine that runs this script installs a chromedriver for its own OS; the
+ * manifest platform only records what is installed. --platform overrides the
+ * host platform - this is how a binary for another machine is pinned and shipped.
+ *
+ * Shared logic lives in scripts/lib.php.
+ */
+
+require __DIR__ . '/lib.php';
+
+$binDir = __DIR__ . '/../bin';
+$manifestPath = $binDir . '/' . MANIFEST_NAME;
+
+exit(main());
+
+function main(): int
+{
+    global $binDir, $manifestPath;
+
+    $opts = parseArgs();
+    if ($opts === null) {
+        fwrite(STDERR, "Usage: php scripts/update-chromedriver [--version=<version|milestone> [--platform=<cfT-platform>]]\n");
+        return 1;
+    }
+
+    $manifest = loadManifest($manifestPath);
+
+    // Platform: explicit --platform wins, else the host platform. The manifest's
+    // platform only records what is installed; the right OS is the one the
+    // script runs on.
+    $platform = $opts['platform'] ?? detectPlatform();
+    echo 'Platform: ' . $platform . ' (' . ($opts['platform'] !== null ? 'explicit' : 'host') . ")\n";
+
+    $isWindows = (strpos($platform, 'win') !== false);
+    $binaryPath = $binDir . ($isWindows ? '/chromedriver.exe' : '/chromedriver');
+
+    if ($opts['version'] !== null) {
+        $installedVersion = is_string($manifest['version'] ?? null) ? $manifest['version'] : '0.0.0.0';
+        return installRequestedVersion($opts['version'], $platform, $installedVersion, $binaryPath, $manifestPath);
+    }
+
+    // ------------------------------------------------------------------
+    // Automatic one-version-only mode
+    // ------------------------------------------------------------------
+
+    // --- Case A: nothing installed -> establish a baseline --------------
+    if (!is_file($binaryPath)) {
+        echo "chromedriver is not installed at $binaryPath - establishing a baseline with the current stable version.\n";
+        return installStableBaseline($platform, $binaryPath, $manifestPath);
+    }
+
+    // --- Case A2: installed binary is for a different OS -----------------
+    $manifestPlatform = is_string($manifest['platform'] ?? null) ? $manifest['platform'] : null;
+    if ($manifestPlatform !== null && $manifestPlatform !== $platform && is_string($manifest['version'] ?? null)) {
+        echo "The installed chromedriver is built for platform '$manifestPlatform', but this host is '$platform'.\n";
+        $sameVersionForHost = resolveDownloadUrl($manifest['version'], $platform);
+        if ($sameVersionForHost !== null) {
+            echo "Installing version {$sameVersionForHost[0]} for '$platform'.\n";
+            return downloadAndInstall($sameVersionForHost[1], $sameVersionForHost[0], $platform, $manifest, $binaryPath, $manifestPath);
+        }
+        echo "Version {$manifest['version']} is not available for '$platform' - installing the current stable as a fresh baseline.\n";
+        return installStableBaseline($platform, $binaryPath, $manifestPath);
+    }
+
+    // --- Case B: baseline not verified -> re-download current stable ----
+    $binarySha256 = hash_file('sha256', $binaryPath);
+    $verifiedBaseline = $manifest !== null
+        && is_string($manifest['version'] ?? null)
+        && (is_string($manifest['binary_sha256'] ?? null))
+        && $binarySha256 === $manifest['binary_sha256'];
+
+    if (!$verifiedBaseline) {
+        echo "The installed binary has no verified baseline (missing manifest or hash mismatch).\n";
+        echo "Re-downloading the current stable version to establish a verified baseline.\n";
+        return installStableBaseline($platform, $binaryPath, $manifestPath);
+    }
+
+    // --- Case C: verified baseline -> step exactly one version -----------
+    $installedVersion = $manifest['version'];
+    $next = findNextStableVersion($installedVersion, $platform);
+    if ($next === null) {
+        echo "Up to date (installed: $installedVersion) - no newer stable version available.\n";
+        return 0;
+    }
+    [$requested] = $next;
+
+    $download = resolveDownloadUrl($requested, $platform);
+    if ($download === null) {
+        echo "Note: chromedriver for the next stable version $requested is not available for platform '$platform'.\n";
+        echo "Leaving the existing installation unchanged.\n";
+        return 0;
+    }
+    if ($download[0] !== $requested) {
+        echo "Note: chromedriver for exact version $requested is not published; using the nearest available version {$download[0]} in the same milestone.\n";
+    }
+
+    echo "Installed chromedriver: $installedVersion\n";
+    echo "Next stable version    : {$download[0]} (one-version-only step)\n";
+
+    return downloadAndInstall($download[1], $download[0], $platform, $manifest, $binaryPath, $manifestPath);
+}
+
+/**
+ * Explicit pin/downgrade mode: resolve the requested version (bare milestone ->
+ * highest version of that milestone with a chromedriver download for $platform),
+ * print the plan and install non-interactively.
+ */
+function installRequestedVersion(
+    string $requested,
+    string $platform,
+    string $installedVersion,
+    string $binaryPath,
+    string $manifestPath
+): int {
+    global $manifestPath;
+
+    $resolved = resolveRequestedVersion($requested, $platform);
+    if ($resolved === null) {
+        echo "Error: could not resolve the requested version '$requested' to a chromedriver release with a download for platform '$platform'.\n";
+        return 1;
+    }
+    $download = resolveDownloadUrl($resolved, $platform);
+    if ($download === null) {
+        echo "Error: no chromedriver download found for version '$resolved' (platform '$platform').\n";
+        return 1;
+    }
+
+    echo "Installed chromedriver: $installedVersion\n";
+    echo "Requested version     : $requested" . ($resolved !== $requested ? " (resolved: {$download[0]})" : '') . "\n";
+    echo "Download URL ($platform): {$download[1]}\n";
+    if (compareVersions($download[0], $installedVersion) < 0) {
+        echo "Note: this is a deliberate downgrade (installed: $installedVersion).\n";
+    } elseif (compareVersions($download[0], $installedVersion) === 0) {
+        echo "Note: the same version is already installed - re-downloading it.\n";
+    }
+
+    $manifest = loadManifest($manifestPath);
+    return downloadAndInstall($download[1], $download[0], $platform, $manifest, $binaryPath, $manifestPath);
+}
+
+/** Download and install the current stable version for $platform. Returns exit code. */
+function installStableBaseline(string $platform, string $binaryPath, string $manifestPath): int
+{
+    global $manifestPath;
+
+    $stable = getCftStableVersion($platform);
+    if ($stable === null) {
+        echo "Note: could not determine the current stable chromedriver version for platform '$platform'.\n";
+        echo "Leaving the existing binaries unchanged.\n";
+        return 0;
+    }
+
+    echo "Installing chromedriver {$stable[0]} (current stable, platform $platform), then future runs step one version at a time.\n";
+    $manifest = loadManifest($manifestPath);
+
+    return downloadAndInstall($stable[1], $stable[0], $platform, $manifest, $binaryPath, $manifestPath);
+}
+
+/**
+ * Parse --version=<version|milestone> and --platform=<cfT-platform> arguments.
+ * Returns an array with $version set only when explicitly given; null when an
+ * unknown argument (or --help) is passed.
+ */
+function parseArgs(): ?array
+{
+    $version = null;
+    $platform = null;
+
+    foreach (array_slice($GLOBALS['argv'] ?? [], 1) as $arg) {
+        if (preg_match('/^--version=(.*)$/', $arg, $m) === 1) {
+            $version = $m[1];
+        } elseif (preg_match('/^--platform=(.*)$/', $arg, $m) === 1) {
+            $platform = $m[1];
+        } else {
+            return null;
+        }
+    }
+
+    return ['version' => $version, 'platform' => $platform];
+}

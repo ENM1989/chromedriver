@@ -1,6 +1,6 @@
 {
     "name": "enm1989/chromedriver",
-    "description": "Composer distribution of Chromedriver. Adds a executable to your composer bin directory.",
+    "description": "Composer distribution of Chromedriver. Installs the right executable for the host platform (linux64, linux-arm64, mac-x64, mac-arm64, win32/win64) at run time.",
     "type": "library",
     "keywords": [
         "selenium",
@@ -20,14 +20,15 @@
         "bin-dir": "bin"
     },
     "bin": [
-        "bin/chromedriver"
+        "bin/chromedriver",
+        "scripts/update-chromedriver"
     ],
     "scripts": {
         "post-install-cmd": [
-            "php scripts/update-chromedriver.php"
+            "php scripts/update-chromedriver"
         ],
         "post-update-cmd": [
-            "php scripts/update-chromedriver.php"
+            "php scripts/update-chromedriver"
         ]
     }
 }

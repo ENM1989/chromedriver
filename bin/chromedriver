@@ -1,0 +1,54 @@
+#!/bin/sh
+# chromedriver bootstrap shim (committed; composer bin "chromedriver").
+#
+# The real chromedriver binaries are NOT shipped in this package. On the first
+# invocation this shim runs scripts/update-chromedriver in automatic mode, which
+# downloads and hash-verifies the current stable chromedriver for THIS host's
+# platform into bin/chromedriver (or bin/chromedriver.exe on Windows).
+#
+# Every later invocation simply forwards to the real binary. On Linux/macOS the
+# real binary replaces this file itself - the composer bin proxy generated for
+# this file is a shell proxy that execs whatever lives at bin/chromedriver, so
+# it keeps working, and `git checkout -- bin/chromedriver` restores the shim
+# before committing or tagging. On Windows the real binary has a different
+# filename (chromedriver.exe), so the shim stays in place and keeps proxying.
+#
+# Manual update / pinning (steps exactly one stable version per run by default):
+#   vendor/bin/update-chromedriver
+#   vendor/bin/update-chromedriver --version=115 [--platform=linux64]
+
+dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+
+case "$(uname -s 2>/dev/null || echo unknown)" in
+MINGW* | CYGWIN* | MSYS* | Windows*) target="$dir/chromedriver.exe" ;;
+*) target="$dir/chromedriver" ;;
+esac
+
+# On Linux/macOS the "target" is this very file until the real binary has been
+# installed over it, so a mere existence check cannot tell the shim from the
+# binary. A real chromedriver is an ELF image (\177ELF) on Linux/macOS or a
+# PE image (MZ) on Windows; the shim itself is a text script starting with #!.
+is_real_binary_installed() {
+    [ -x "$target" ] || return 1
+    case "$(dd if="$target" bs=1 count=1 2>/dev/null || true)" in
+    "$(printf '\177')" | M) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+if is_real_binary_installed; then
+    exec "$target" "$@"
+fi
+
+if ! command -v php >/dev/null 2>&1; then
+    echo "Error: the chromedriver binary is missing and no 'php' executable was found to install it." >&2
+    echo "Run 'vendor/bin/update-chromedriver' once (with PHP available), then retry." >&2
+    exit 1
+fi
+php "$dir/../scripts/update-chromedriver" || exit $?
+
+if ! is_real_binary_installed; then
+    echo "Error: the chromedriver binary could not be installed for this host." >&2
+    exit 1
+fi
+exec "$target" "$@"
